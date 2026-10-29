@@ -1,0 +1,54 @@
+name: Офлайн-карта области
+
+on:
+  push:
+    paths:
+      - '.github/workflows/offline-map.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+
+      - name: Кэш выгрузки OSM
+        uses: actions/cache@v4
+        with:
+          path: osm-cache
+          key: osm-south-${{ github.run_id }}
+          restore-keys: osm-south-
+
+      - name: Выгрузка OSM по Ростовской области
+        run: |
+          mkdir -p osm-cache
+          f=osm-cache/south.osm.pbf
+          if [ ! -f "$f" ] || [ -n "$(find "$f" -mtime +7)" ]; then
+            curl -sSL -o "$f" https://download.geofabrik.de/russia/south-fed-district-latest.osm.pbf
+          fi
+          osmium extract -b 38.2,45.9,44.4,50.3 "$f" -o rostov.osm.pbf --overwrite
+          ls -lh rostov.osm.pbf
+
+      - name: Векторные тайлы (Planetiler, схема OpenMapTiles)
+        run: |
+          curl -sSL -o planetiler.jar https://github.com/onthegomap/planetiler/releases/latest/download/planetiler.jar
+          java -Xmx5g -jar planetiler.jar --osm-path=rostov.osm.pbf --bounds=38.2,45.9,44.4,50.3 \
+            --download --maxzoom=14 --output=rostov.mbtiles --force
+          ls -lh rostov.mbtiles
+
+      - name: Выложить файл для скачивания из приложения
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view offline-map -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create offline-map -R "$GITHUB_REPOSITORY" --title "Офлайн-карта Ростовской области" \
+              --notes "Векторные тайлы из OpenStreetMap (© участники OpenStreetMap, ODbL), схема OpenMapTiles."
+          gh release upload offline-map rostov.mbtiles -R "$GITHUB_REPOSITORY" --clobber
